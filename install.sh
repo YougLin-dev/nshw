@@ -37,11 +37,39 @@ if [ -n "$token" ]; then
 else
     printf '%s\n' 'no release token; for a private repository, use gh auth login or NSHW_TOKEN' >&2
 fi
-# Word splitting is intentional: curl_auth is empty or exactly two argv words.
-# shellcheck disable=SC2086
-curl -fSL --retry 2 --connect-timeout 30 $curl_auth "$url" -o "$work/$asset"
-# shellcheck disable=SC2086
-curl -fSL --retry 2 --connect-timeout 30 $curl_auth "$url.sha256" -o "$work/$asset.sha256"
+gh_assets=0
+case "$repo" in
+    http://*|https://*) ;;
+    */*) gh_assets=1 ;;
+esac
+if [ -z "${NSHW_BASE_URL:-}" ] && [ -n "$token" ] && [ "$gh_assets" -eq 1 ]; then
+    command -v gh >/dev/null 2>&1 || {
+        printf '%s\n' 'private GitHub installation requires gh in PATH' >&2
+        exit 1
+    }
+    list="$work/assets.ids"
+    # gh obtains exact asset IDs from the API without putting credentials
+    # in a URL. curl fetches only the binary/checksum bytes below.
+    GH_TOKEN="$token" gh api "repos/$repo/releases/tags/v$version" \
+        --jq '.assets[] | [.id, .name] | @tsv' > "$list"
+    api="https://api.github.com/repos/$repo/releases/assets"
+    printf 'header = "Accept: application/octet-stream"\n' >> "$work/curl.auth"
+    for file in "$asset" "$asset.sha256"; do
+        id=$(awk -F '\t' -v name="$file" '$2 == name { print $1; exit }' "$list")
+        [ -n "$id" ] || { printf 'missing release asset: %s\n' "$file" >&2; exit 1; }
+        curl -fSL --retry 2 --connect-timeout 30 --config "$work/curl.auth" "$api/$id" -o "$work/$file"
+    done
+    curl_ok=1
+else
+    curl_ok=0
+fi
+if [ "$curl_ok" -eq 0 ]; then
+    # Public downloads and explicitly selected mirrors keep plain URLs.
+    # shellcheck disable=SC2086
+    curl -fSL --retry 2 --connect-timeout 30 $curl_auth "$url" -o "$work/$asset"
+    # shellcheck disable=SC2086
+    curl -fSL --retry 2 --connect-timeout 30 $curl_auth "$url.sha256" -o "$work/$asset.sha256"
+fi
 if command -v sha256sum >/dev/null 2>&1; then
     actual=$(sha256sum "$work/$asset" | cut -d ' ' -f 1)
 else
