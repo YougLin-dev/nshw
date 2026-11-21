@@ -1,0 +1,24 @@
+[package]
+name = "nshw"
+description = "Run the Native Shell CLI a project pins, always."
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/YougLin-dev/nshw"
+homepage = "https://github.com/YougLin-dev/nshw"
+
+[[bin]]
+name = "nshw"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+flate2 = "1"
+git2 = { version = "0.20", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
+toml = "0.8"
+ureq = { version = "~3.5.2", features = ["platform-verifier"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
