@@ -3,7 +3,7 @@
 set -eu
 repo="${NSHW_REPOSITORY:-YougLin-dev/nshw}"
 home="${NSHW_HOME:-$HOME/.nshw}"
-version="${NSHW_VERSION:-0.1.0}"
+version="${NSHW_VERSION:-0.1.1}"
 case "${1:-}" in
     '') default=0 ;;
     --set-default) default=1 ;;
