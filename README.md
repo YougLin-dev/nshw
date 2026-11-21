@@ -30,7 +30,13 @@ and abbreviated commit hashes are rejected; an exact declaration is the only
 input to selection.
 
 - **Release:** download that tag's archive, verify the published SHA-256,
-  validate its `nsh/` layout and atomically install it into the cache.
+  validate the current OS's CLI and desktop host/runner, and atomically
+  install them into the cache. Cache hits revalidate those paths. When a Rust
+  app locks `nsh-core` from Git, `nsh-release.json` must attest the exact
+  commit on every cache hit as well: its absence is an error, not a fallback.
+  If the current release offers no such metadata, use its exact full Git
+  commit as the pin instead. Older releases without it remain available to
+  TSX-only apps, including their desktop host/runner.
 - **Git revision:** fetch that exact commit from the declared repository with
   the system `git`, then run its locked desktop builds: `nsh-cli` and this
   platform's development host and release runner. This is a complete desktop
@@ -38,10 +44,15 @@ input to selection.
   Optional iOS/Android/Web/GPUI/TUI components are not built or substituted
   from another release. The full commit owns its source, build output and
   serialization lock; inherited `CARGO_TARGET_DIR`/`CARGO_BUILD_TARGET`
-  settings are removed so NSH's own target layout cannot be redirected.
+settings are removed so NSH's own target layout cannot be redirected. A
+  full SHA matches `Cargo.lock`'s Git revision before every execution,
+  including before reading a complete cached source toolchain.
 - **Execution:** `exec` on Unix, synchronous execution with exit-status
-  propagation on Windows. Original arguments are unchanged. No Cargo manifest
-  or lockfile is modified. Only the explicit pin command edits `nsh.json`.
+  propagation on Windows. Original arguments are unchanged. Only a positional
+  app entry selects a project; option values such as `--name /another/app`
+  never do. `NSH_RUNTIME` is cleared for a pinned invocation so its runtime
+  also comes from the selected distribution. No Cargo manifest or lockfile
+  is modified by nshw; NSH's own build generation remains its responsibility.
 
 ## Commands
 

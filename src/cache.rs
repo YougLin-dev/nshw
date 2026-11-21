@@ -9,11 +9,7 @@ use std::{
 
 use anyhow::{Context as _, bail};
 
-use crate::{
-    archive, exec, manifest,
-    release::{self, RELEASE_INFO},
-    source,
-};
+use crate::{archive, exec, manifest, release, source};
 
 /// `NSH_CACHE`, else the platform's cache directory, plus `nsh`.
 pub(crate) fn cache_root() -> anyhow::Result<PathBuf> {
@@ -47,6 +43,75 @@ fn selected_dir(root: &Path, pin: &manifest::Pin, host: &str) -> PathBuf {
         .join(host)
 }
 
+/// Validate this binding before every execution, including complete caches.
+fn source_revision(
+    app: &Path,
+    config: &manifest::Config,
+    pin: &manifest::Pin,
+) -> anyhow::Result<()> {
+    if let Some(rev) = &pin.revision
+        && let Some(expected) = manifest::expected_rev(app, config)?
+        && expected != *rev
+    {
+        bail!("the toolchain pins {rev}, but Cargo.lock has nsh-core at {expected}");
+    }
+    Ok(())
+}
+
+fn normalize_revision(revision: &str) -> anyhow::Result<String> {
+    let revision = revision.to_ascii_lowercase();
+    if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("Cargo.lock has an invalid full nsh-core revision");
+    }
+    Ok(revision)
+}
+
+/// The distributed desktop executables, never just a CLI.
+fn release_files(dir: &Path, expected: Option<&str>) -> anyhow::Result<PathBuf> {
+    let bin = dir.join("bin").join(exec::exe("nsh"));
+    if !bin.is_file() {
+        bail!("{} is missing the selected CLI", dir.display());
+    }
+    let os = std::env::consts::OS;
+    for part in ["host", "app"] {
+        let name = exec::exe(&format!("nsh-{os}-{part}"));
+        let path = dir.join("runtime").join(os).join(name);
+        if !path.is_file() {
+            bail!(
+                "{} is missing the desktop runtime {}",
+                dir.display(),
+                path.display()
+            );
+        }
+    }
+    let info: release::Info = match fs::read_to_string(dir.join(release::RELEASE_INFO)) {
+        Ok(text) => serde_json::from_str(&text)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if expected.is_some() {
+                bail!("the selected release has no source-commit metadata for its Rust app");
+            }
+            return Ok(bin);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let commit = info
+        .commit
+        .as_deref()
+        .with_context(|| "the selected release has no source commit")?;
+    let commit = commit.to_ascii_lowercase();
+    if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("{} has an invalid source commit", release::RELEASE_INFO);
+    }
+    if let Some(expected) = expected
+        && !commit.eq_ignore_ascii_case(expected)
+    {
+        bail!(
+            "the selected release is built from {commit}, but Cargo.lock has nsh-core at {expected}"
+        );
+    }
+    Ok(bin)
+}
+
 /// Installs (once) and returns the `nsh` of `pin` for this machine.
 pub(crate) fn ensure(
     app: &Path,
@@ -54,25 +119,27 @@ pub(crate) fn ensure(
     pin: &manifest::Pin,
 ) -> anyhow::Result<PathBuf> {
     let host = release::host()?;
-    if pin.version.starts_with("rev=") {
+    source_revision(app, config, pin)?;
+    if pin.revision.is_some() {
         return source::ensure_with_root(&cache_root()?, pin, host);
     }
+    let expected = manifest::expected_rev(app, config)?;
+    let expected = expected.as_deref().map(normalize_revision).transpose()?;
+    let expected = expected.as_deref();
     crate::trust::check(pin)?;
-    ensure_in(&cache_root()?, app, config, pin, release::BASE)
+    ensure_in(&cache_root()?, expected, pin, release::BASE)
 }
 
 fn ensure_in(
     root: &Path,
-    app: &Path,
-    config: &manifest::Config,
+    expected: Option<&str>,
     pin: &manifest::Pin,
     base: &str,
 ) -> anyhow::Result<PathBuf> {
     let host = release::host()?;
     let dir = selected_dir(root, pin, host);
-    let bin = dir.join("bin").join(exec::exe("nsh"));
-    if bin.is_file() && dir.join(".complete").is_file() {
-        return Ok(bin);
+    if dir.join(".complete").is_file() {
+        return release_files(&dir, expected);
     }
 
     let version_dir = dir.parent().context("toolchain directory")?;
@@ -87,30 +154,38 @@ fn ensure_in(
         .with_context(|| format!("open {}", lock_path.display()))?;
     lock.lock()
         .with_context(|| format!("lock {}", lock_path.display()))?;
-    if bin.is_file() && dir.join(".complete").is_file() {
-        return Ok(bin);
+    if dir.join(".complete").is_file() {
+        return release_files(&dir, expected);
     }
 
-    let expected = manifest::expected_rev(app, config)?;
     let info = release::fetch_at(base, &pin.repository, &pin.tag)?;
-    if let Some(info) = &info {
-        if let Some(expected) = expected.as_deref() {
-            let commit = info
-                .commit
-                .as_deref()
-                .with_context(|| format!("{} has no commit in its nsh-release.json", pin.tag))?;
-            if commit != expected {
-                bail!(
-                    "{} is built from {commit}, but the app pins nsh-core at {expected}",
-                    pin.tag
-                );
-            }
+    if let Some(expected) = expected {
+        let info = info.as_ref().with_context(|| {
+            format!(
+                "{} has no {}; a Rust app requires release provenance",
+                pin.tag,
+                release::RELEASE_INFO
+            )
+        })?;
+        if info.tag.as_deref() != Some(&pin.tag) {
+            bail!(
+                "{} does not identify the exact tag {}",
+                release::RELEASE_INFO,
+                pin.tag
+            );
         }
-    } else if expected.is_some() {
-        eprintln!(
-            "nshw: {} has no {RELEASE_INFO}; the pinned nsh-core commit is not verified",
-            pin.tag
-        );
+        let commit = info
+            .commit
+            .as_deref()
+            .with_context(|| format!("{} has no commit in {}", pin.tag, release::RELEASE_INFO))?;
+        match commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            true if expected.eq_ignore_ascii_case(commit) => {}
+            true => bail!(
+                "{} is built from {commit}, but the app pins nsh-core at {expected}",
+                pin.tag
+            ),
+            false => bail!("{} has an invalid source commit", release::RELEASE_INFO),
+        }
     }
 
     let asset = release::asset(host);
@@ -120,6 +195,13 @@ fn ensure_in(
     let result = (|| {
         release::download(base, &pin.repository, &pin.tag, &asset, &part)?;
         let unpacked = archive::unpack(&part, &staging)?;
+        if let Some(info) = &info {
+            fs::write(
+                unpacked.join(release::RELEASE_INFO),
+                serde_json::to_vec(info)?,
+            )?;
+        }
+        release_files(&unpacked, expected)?;
         if dir.exists() {
             fs::remove_dir_all(&dir).with_context(|| format!("remove {}", dir.display()))?;
         }
@@ -136,7 +218,7 @@ fn ensure_in(
             pin.version, pin.repository
         )
     })?;
-    Ok(bin)
+    release_files(&dir, expected)
 }
 
 #[cfg(test)]
@@ -165,6 +247,7 @@ mod tests {
         let pin = manifest::Pin {
             version: "0.6.1".into(),
             tag: "v0.6.1".into(),
+            revision: None,
             repository: "acme/nsh".into(),
         };
         let root = std::env::temp_dir().join(format!(
@@ -190,12 +273,64 @@ mod tests {
         let pin = manifest::Pin {
             version: "0.6.1".into(),
             tag: "v0.6.1".into(),
+            revision: None,
             repository: release::DEFAULT_REPOSITORY.into(),
         };
         assert_eq!(
             selected_dir(Path::new("/cache"), &pin, "macos-arm64"),
             Path::new("/cache/toolchains/longbridge__nsh/0.6.1/macos-arm64")
         );
+    }
+
+    #[test]
+    fn a_cached_release_checks_the_current_rust_revision_and_desktop_files() {
+        let root = std::env::temp_dir().join(format!("nshw-release-cache-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let distribution = root.join("toolchains/longbridge__nsh/0.6.1/macos-arm64");
+        let os = std::env::consts::OS;
+        fs::create_dir_all(distribution.join("bin")).unwrap();
+        fs::write(distribution.join("bin").join(exec::exe("nsh")), b"cli").unwrap();
+        assert!(release_files(&distribution, None).is_err());
+        for part in ["host", "app"] {
+            let name = exec::exe(&format!("nsh-{os}-{part}"));
+            fs::create_dir_all(distribution.join("runtime").join(os)).unwrap();
+            fs::write(distribution.join("runtime").join(os).join(name), b"runtime").unwrap();
+        }
+        fs::write(
+            distribution.join(release::RELEASE_INFO),
+            r#"{"commit":"ABCDEF0123456789ABCDEF0123456789ABCDEF01"}"#,
+        )
+        .unwrap();
+        assert!(
+            release_files(
+                &distribution,
+                Some("abcdef0123456789abcdef0123456789abcdef01")
+            )
+            .is_ok()
+        );
+        assert!(
+            release_files(
+                &distribution,
+                Some("c24505c146c8b7966d780c65879b5822d09beac5")
+            )
+            .is_err()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_source_pin_and_lock_must_agree_before_even_a_cache_read() {
+        let root = std::env::temp_dir().join(format!("nshw-source-lock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("native")).unwrap();
+        fs::write(root.join("nsh.json"), r#"{"rust":"native"}"#).unwrap();
+        fs::write(root.join("native/Cargo.lock"), format!("version=4\n[[package]]\nname=\"nsh-core\"\nsource=\"git+https://github.com/YougLin-dev/nsh#{}\"\n", "e0ca503108f5f6aa8501e17d342fc06de641975")).unwrap();
+        let config = manifest::read_config(&root).unwrap();
+        let pin = manifest::pin(&manifest::read_config(&root).unwrap()).unwrap();
+        assert!(pin.is_none());
+        let pin = manifest::pin(&serde_json::from_value(serde_json::json!({"toolchain":{"nsh":{"version":"rev=C24505C146C8B7966D780C65879B5822D09BEAC5","repository":"YougLin-dev/nsh"}}})).unwrap()).unwrap().unwrap();
+        assert!(source_revision(&root, &config, &pin).is_err());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
@@ -234,7 +369,7 @@ mod tests {
                 format!("{hash}  {asset}\n").into_bytes(),
             ),
             (
-                format!("{base_path}/{RELEASE_INFO}"),
+                format!("{base_path}/{}", release::RELEASE_INFO),
                 format!(r#"{{"version":"0.6.0","commit":"{commit}","tag":"v0.6.1"}}"#).into_bytes(),
             ),
         ]
@@ -246,7 +381,7 @@ mod tests {
         let config = manifest::read_config(&app).unwrap();
         let pin = manifest::pin(&config).unwrap().unwrap();
         let root = dir.join("cache");
-        let bin = ensure_in(&root, &app, &config, &pin, &base).unwrap();
+        let bin = ensure_in(&root, Some(commit), &pin, &base).unwrap();
         assert_eq!(
             bin,
             root.join("toolchains/longbridge__nsh/0.6.1")
@@ -261,13 +396,20 @@ mod tests {
     #[cfg(unix)]
     fn tarball() -> Vec<u8> {
         let mut tar = tar::Builder::new(Vec::new());
-        let data = b"fake";
-        let mut header = tar::Header::new_gnu();
-        header.set_size(data.len() as u64);
-        header.set_mode(0o755);
-        header.set_cksum();
-        tar.append_data(&mut header, "nsh/bin/nsh", &data[..])
-            .unwrap();
+        let os = std::env::consts::OS;
+        let files = [
+            "nsh/bin/nsh".to_owned(),
+            format!("nsh/runtime/{os}/nsh-{os}-host"),
+            format!("nsh/runtime/{os}/nsh-{os}-app"),
+        ];
+        for path in files {
+            let data = b"fake";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(&mut header, path, &data[..]).unwrap();
+        }
         let tar = tar.into_inner().unwrap();
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(&tar).unwrap();

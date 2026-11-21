@@ -5,6 +5,7 @@ use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 #[cfg(windows)]
@@ -14,6 +15,30 @@ use anyhow::bail;
 /// The executable's file name on this platform (`nsh.exe` on Windows).
 pub(crate) fn exe(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
+}
+
+fn pinned_command(bin: &Path, args: &[OsString]) -> Command {
+    let mut command = Command::new(bin);
+    command.args(args).env_remove("NSH_RUNTIME");
+    command
+}
+
+/// A pinned distribution owns its adjacent runtime; an inherited override
+/// must not replace the selected desktop host or release runner.
+pub(crate) fn exec_pinned(bin: &Path, args: &[OsString]) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let error = pinned_command(bin, args).exec();
+        Err(anyhow::Error::new(error).context(format!("exec {}", bin.display())))
+    }
+    #[cfg(windows)]
+    {
+        let status = pinned_command(bin, args)
+            .status()
+            .with_context(|| format!("run {}", bin.display()))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }
 
 /// Replaces this process with `bin` on Unix, or runs it and exits with its
@@ -74,6 +99,45 @@ fn fallback_bin() -> Option<PathBuf> {
     if let Some(installed) = installed.and_then(|path| candidate(path, current.as_ref())) {
         return Some(installed);
     }
+
     std::env::split_paths(&std::env::var_os("PATH")?)
         .find_map(|dir| candidate(dir.join(exe("nsh")), current.as_ref()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pinned_command_clears_a_foreign_runtime_but_keeps_other_argv() {
+        let mut command = pinned_command(
+            Path::new("/pinned/bin/nsh"),
+            &[
+                OsString::from("test"),
+                OsString::from("--junit"),
+                OsString::from("report.xml"),
+            ],
+        );
+        let command = command.env("NSH_TEST_ARGUMENT", "unchanged");
+        assert_eq!(
+            command.get_program(),
+            Path::new("/pinned/bin/nsh").as_os_str()
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["test", "--junit", "report.xml"].map(OsString::from)
+        );
+        assert!(
+            command
+                .get_envs()
+                .any(|(name, value)| name == "NSH_RUNTIME" && value.is_none())
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(name, _)| *name == "NSH_TEST_ARGUMENT")
+                .and_then(|(_, value)| value),
+            Some(std::ffi::OsStr::new("unchanged"))
+        );
+    }
 }

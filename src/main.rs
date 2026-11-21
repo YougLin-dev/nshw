@@ -54,16 +54,13 @@ fn is_nsh_alias() -> bool {
 }
 
 fn forward(args: &[OsString]) -> anyhow::Result<()> {
-    let app = match manifest::find_app(args) {
-        Ok(app) => app,
-        Err(_) => return exec::fallback(args),
-    };
+    let app = manifest::find_app(args)?;
     let config = manifest::read_config(&app)?;
     let Some(pin) = manifest::pin(&config)? else {
         return exec::fallback(args);
     };
     let bin = cache::ensure(&app, &config, &pin)?;
-    exec::exec(&bin, args)
+    exec::exec_pinned(&bin, args)
 }
 
 /// nshw's administration, never NSH's own commands or package verification.
@@ -157,6 +154,12 @@ fn pin_command(args: &[OsString]) -> anyhow::Result<()> {
 }
 
 fn status(app: &Path, config: &manifest::Config, pin: &manifest::Pin) -> anyhow::Result<()> {
+    if let Some(rev) = &pin.revision
+        && let Some(expected) = manifest::expected_rev(app, config)?
+        && &expected != rev
+    {
+        anyhow::bail!("the toolchain pins {rev}, but Cargo.lock has nsh-core at {expected}");
+    }
     let host = release::host()?;
     let dir = cache::toolchain_dir(pin, host)?;
     let bin = dir.join("bin").join(exec::exe("nsh"));
@@ -181,7 +184,7 @@ fn status(app: &Path, config: &manifest::Config, pin: &manifest::Pin) -> anyhow:
 
 fn verify(app: &Path, config: &manifest::Config, pin: &manifest::Pin) -> anyhow::Result<()> {
     let expected = manifest::expected_rev(app, config)?;
-    if let Some(rev) = pin.version.strip_prefix("rev=") {
+    if let Some(rev) = pin.revision.as_deref() {
         if let Some(expected) = expected.as_deref()
             && expected != rev
         {

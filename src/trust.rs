@@ -53,6 +53,7 @@ mod tests {
         Pin {
             version: "0.6.1".into(),
             tag: "v0.6.1".into(),
+            revision: None,
             repository: repository.into(),
         }
     }

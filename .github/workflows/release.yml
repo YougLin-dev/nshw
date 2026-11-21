@@ -41,7 +41,8 @@ jobs:
           cargo build --release --locked --target "${{ matrix.target }}"
           rm -rf dist
           mkdir -p dist/nshw/bin
-          if [[ "${{ matrix.os }}" = windows-latest ]]; then exe=nshw.exe; else exe=nshw; fi
+          # The target, rather than the runner's marketing name, selects the suffix.
+          if [[ "${{ matrix.target }}" = *-pc-windows-msvc ]]; then exe=nshw.exe; else exe=nshw; fi
           cp "target/${{ matrix.target }}/release/$exe" dist/nshw/bin/
           ./dist/nshw/bin/$exe toolchain version
           (cd dist && tar czf "../nshw-${{ matrix.name }}.tar.gz" nshw)

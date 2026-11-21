@@ -2,7 +2,6 @@
 //! and a SHA-256 check before any bytes are accepted into the cache.
 
 use anyhow::{Context as _, bail};
-use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::{
     fs,
@@ -16,7 +15,7 @@ pub(crate) const RELEASE_INFO: &str = "nsh-release.json";
 pub(crate) const BASE: &str = "https://github.com";
 const USER_AGENT: &str = concat!("nshw/", env!("CARGO_PKG_VERSION"));
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct Info {
     #[serde(default)]
     pub(crate) version: Option<String>,
@@ -139,6 +138,12 @@ impl Response {
 }
 
 fn get(url: &str) -> anyhow::Result<Response> {
+    get_at(url, url.starts_with("https://"))
+}
+
+/// Fixture HTTP remains possible, but a public HTTPS release can never
+/// redirect its executable or checksum to cleartext HTTP.
+fn get_at(url: &str, public: bool) -> anyhow::Result<Response> {
     let file = tempfile::NamedTempFile::new()?;
     let directory = file
         .path()
@@ -147,21 +152,22 @@ fn get(url: &str) -> anyhow::Result<Response> {
     fs::create_dir_all(directory)?;
     let body_path = file.path().to_owned();
     let body = file.into_temp_path();
-    let output = Command::new("curl")
-        .args([
-            "--silent",
-            "--show-error",
-            "--location",
-            "--proto",
-            "=http,https",
-            "--proto-redir",
-            "=http,https",
-            "--max-redirs",
-            "10",
-            "--connect-timeout",
-            "30",
-            "--header",
-        ])
+    let mut command = Command::new("curl");
+    command.args([
+        "--silent",
+        "--show-error",
+        "--location",
+        "--proto",
+        "=http,https",
+        "--proto-redir",
+        if public { "=https" } else { "=http,https" },
+        "--max-redirs",
+        "10",
+        "--connect-timeout",
+        "30",
+        "--header",
+    ]);
+    let output = command
         .arg(format!("User-Agent: {USER_AGENT}"))
         .args(["--output"])
         .arg(&body_path)

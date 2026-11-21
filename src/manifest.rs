@@ -39,34 +39,146 @@ pub(crate) struct Pin {
     pub(crate) version: String,
     /// The release tag the version names, e.g. `v0.6.1`.
     pub(crate) tag: String,
+    /// The normalized full Git commit, absent for a release.
+    pub(crate) revision: Option<String>,
     /// `owner/repo` whose GitHub releases hold the distribution.
     pub(crate) repository: String,
 }
 
-/// The app directory holding `nsh.json`: this directory or an ancestor, else
-/// a directory or entry named in `args` (the command's app path).
+pub(crate) fn consumes_value(name: &str) -> bool {
+    matches!(
+        name,
+        "--name"
+            | "--template"
+            | "--nsh-source"
+            | "--out"
+            | "--filter"
+            | "--junit"
+            | "--target"
+            | "--browser"
+            | "--web-host"
+            | "--device"
+            | "--display"
+            | "--tsc"
+            | "--port"
+            | "--points-per-cell"
+            | "--window-size"
+            | "--id"
+            | "--app-version"
+            | "--build"
+            | "--icon"
+            | "--sign"
+            | "--profile"
+            | "--keystore"
+            | "--key-alias"
+            | "--keystore-password"
+            | "--key_alias"
+            | "--keystore_password"
+            | "--abi"
+            | "--format"
+            | "--arch"
+            | "--asset-url"
+            | "--key"
+            | "--cert"
+            | "--source-map"
+            | "--min-runtime"
+            | "--package"
+            | "--entry"
+            | "--notes"
+            | "--link"
+            | "--base-url"
+            | "--bundle"
+            | "--root"
+            | "--revocations"
+            | "--extend"
+            | "--sequence"
+            | "--days"
+            | "--apps"
+    )
+}
+
+/// Only an app command's positional entry may select a project. NSH's argv
+/// is forwarded verbatim, but options still have their own grammar: treating
+/// every path-shaped token as an app can silently select another toolchain.
+fn app_argument(args: &[OsString]) -> Option<OsString> {
+    let mut index = 0;
+    let mut positional = false;
+    let mut command = None;
+    while index < args.len() {
+        let arg = args[index].to_string_lossy();
+        if arg == "--" {
+            positional = true;
+            index += 1;
+            continue;
+        }
+        if !positional && (arg == "-v" || arg == "--verbose" || arg.starts_with("--verbose=")) {
+            index += 1;
+            continue;
+        }
+        if !positional && arg.starts_with('-') {
+            if !arg.contains('=') && consumes_value(&arg) {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+        if command.is_none() {
+            command = Some(arg.into_owned());
+            index += 1;
+            continue;
+        }
+        let app_command = matches!(
+            command.as_deref(),
+            Some(
+                "init"
+                    | "build"
+                    | "test"
+                    | "check"
+                    | "dev"
+                    | "run"
+                    | "package"
+                    | "publish"
+                    | "verify"
+            )
+        );
+        return app_command.then(|| args[index].clone());
+    }
+    // No explicit entry: app commands take their current directory.
+    matches!(
+        command.as_deref(),
+        Some(
+            "init" | "build" | "test" | "check" | "dev" | "run" | "package" | "publish" | "verify",
+        )
+    )
+    .then(|| OsString::from("."))
+}
+
+/// The explicit app entry wins; otherwise this directory or an ancestor.
 pub(crate) fn find_app(args: &[OsString]) -> anyhow::Result<PathBuf> {
-    let cwd = std::env::current_dir().context("current directory")?;
-    for arg in args {
-        let Some(arg) = arg.to_str() else {
-            continue;
+    if let Some(entry) = app_argument(args) {
+        let path = Path::new(&entry);
+        let start = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
         };
-        if arg.starts_with('-') {
-            continue;
+        if let Some(app) = start.ancestors().find(|dir| dir.join("nsh.json").is_file()) {
+            return Ok(app.to_owned());
         }
-        let path = Path::new(arg);
-        if path.is_dir() && path.join("nsh.json").is_file() {
-            return Ok(path.to_owned());
-        }
-        if path.is_file()
-            && let Some(parent) = path.parent()
-            && parent.join("nsh.json").is_file()
-        {
-            return Ok(parent.to_owned());
-        }
+        bail!(
+            "{} is not inside an app containing nsh.json",
+            path.display()
+        );
+    }
+    let cwd = std::env::current_dir().context("current directory")?;
+    if let Some(app) = [cwd.join("src"), cwd.clone()]
+        .into_iter()
+        .find(|dir| dir.join("nsh.json").is_file())
+    {
+        return Ok(app.canonicalize().unwrap_or(app));
     }
     if let Some(app) = cwd.ancestors().find(|dir| dir.join("nsh.json").is_file()) {
-        return Ok(app.to_owned());
+        return Ok(app.canonicalize().unwrap_or_else(|_| app.to_owned()));
     }
     bail!("no nsh.json found here or in the arguments; run inside an app or pass its directory")
 }
@@ -94,6 +206,7 @@ pub(crate) fn pin(config: &Config) -> anyhow::Result<Option<Pin>> {
         if rev.len() != 40 || !rev.bytes().all(|c| c.is_ascii_hexdigit()) {
             bail!("\"toolchain.nsh.version\" rev must be a full 40-hex Git commit");
         }
+        let rev = rev.to_ascii_lowercase();
         let repository = nsh
             .repository
             .as_deref()
@@ -101,8 +214,9 @@ pub(crate) fn pin(config: &Config) -> anyhow::Result<Option<Pin>> {
             .to_owned();
         validate_repository(&repository)?;
         return Ok(Some(Pin {
-            version: version.to_owned(),
+            version: format!("rev={rev}"),
             tag: format!("rev={rev}"),
+            revision: Some(rev),
             repository,
         }));
     }
@@ -139,6 +253,7 @@ pub(crate) fn pin(config: &Config) -> anyhow::Result<Option<Pin>> {
     Ok(Some(Pin {
         version: version.to_owned(),
         tag,
+        revision: None,
         repository,
     }))
 }
@@ -370,6 +485,61 @@ version = "1.0.0"
         std::env::set_current_dir(&current).unwrap();
         let selected = find_app(&[OsString::from("run"), other.as_os_str().to_owned()]);
         assert_eq!(selected.unwrap(), other);
+        let selected = find_app(&[
+            OsString::from("run"),
+            OsString::from("--name"),
+            root.as_os_str().to_owned(),
+            other.as_os_str().to_owned(),
+        ]);
+        assert_eq!(selected.unwrap(), other);
+        let _restore = Restore(std::env::current_dir().unwrap());
+        assert!(
+            find_app(&[
+                OsString::from("run"),
+                OsString::from("--name"),
+                root.as_os_str().to_owned(),
+                OsString::from("/missing"),
+            ])
+            .unwrap_err()
+            .to_string()
+            .contains("not inside an app")
+        );
+        let original = std::env::current_dir().unwrap();
+        fs::create_dir_all(root.join("unrelated")).unwrap();
+        std::env::set_current_dir(root.join("unrelated")).unwrap();
+        let _ = std::env::set_current_dir(original);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn uppercase_commits_are_normalized_before_cache_selection() {
+        let pin = pin(&config(
+            r#"{"toolchain":{"nsh":{"version":"rev=C24505C146C8B7966D780C65879B5822D09BEAC5","repository":"YougLin-dev/nsh"}}}"#,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            pin.revision.as_deref(),
+            Some("c24505c146c8b7966d780c65879b5822d09beac5")
+        );
+        assert_eq!(pin.version, "rev=c24505c146c8b7966d780c65879b5822d09beac5");
+    }
+
+    #[test]
+    fn the_commands_src_default_discovers_its_app() {
+        let root = std::env::temp_dir().join(format!("nshw-default-app-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/nsh.json"), "{}").unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&root).unwrap();
+        let selected = find_app(&[OsString::from("toolchain"), OsString::from("prefetch")]);
+        std::env::set_current_dir(original).unwrap();
+        assert_eq!(selected.unwrap(), root.join("src").canonicalize().unwrap());
+        assert_eq!(
+            app_argument(&[OsString::from("run")]),
+            Some(OsString::from("."))
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

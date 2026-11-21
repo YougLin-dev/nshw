@@ -233,6 +233,7 @@ mod tests {
         let pin = manifest::Pin {
             version: format!("rev={rev}"),
             tag: rev.clone(),
+            revision: Some(rev.clone()),
             repository: crate::release::DEFAULT_REPOSITORY.into(),
         };
         let cache = base.join("cache");
