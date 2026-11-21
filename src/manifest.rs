@@ -187,11 +187,10 @@ pub(crate) fn expected_rev(app: &Path, config: &Config) -> anyhow::Result<Option
             .ancestors()
             .find(|dir| dir.join("Cargo.lock").is_file())
         else {
-            eprintln!(
-                "nshw: no Cargo.lock under {}; its nsh-core revision is not checked",
+            bail!(
+                "no Cargo.lock under {}; an unverified Rust crate must not run with another NSH revision",
                 crate_dir.display()
             );
-            continue;
         };
         let lock = lock_dir.join("Cargo.lock");
         let text = fs::read_to_string(&lock).with_context(|| format!("read {}", lock.display()))?;
@@ -339,6 +338,16 @@ version = "1.0.0"
         .unwrap();
         assert_eq!(expected_rev(&app, &config).unwrap(), None);
         let _ = fs::remove_dir_all(&app);
+    }
+
+    #[test]
+    fn a_rust_app_needs_a_readable_lockfile() {
+        let app = std::env::temp_dir().join(format!("nshw-lock-required-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&app);
+        fs::create_dir_all(app.join("native")).unwrap();
+        let error = expected_rev(&app, &config(r#"{"rust":"native"}"#)).unwrap_err();
+        assert!(error.to_string().contains("no Cargo.lock"), "{error}");
+        let _ = fs::remove_dir_all(app);
     }
 
     #[test]

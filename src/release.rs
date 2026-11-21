@@ -195,6 +195,11 @@ mod tests {
             url(BASE, DEFAULT_REPOSITORY, "v0.6.1", "nsh-macos-arm64.tar.gz"),
             "https://github.com/longbridge/nsh/releases/download/v0.6.1/nsh-macos-arm64.tar.gz"
         );
-        assert_eq!(asset("macos-arm64"), "nsh-macos-arm64.tar.gz");
+        let expected = if cfg!(windows) {
+            "nsh-macos-arm64.zip"
+        } else {
+            "nsh-macos-arm64.tar.gz"
+        };
+        assert_eq!(asset("macos-arm64"), expected);
     }
 }

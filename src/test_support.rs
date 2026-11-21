@@ -83,6 +83,12 @@ fn git(root: &Path, args: &[&str]) -> anyhow::Result<()> {
     anyhow::ensure!(
         Command::new("git")
             .current_dir(root)
+            .args([
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.com"
+            ])
             .args(args)
             .status()?
             .success(),
