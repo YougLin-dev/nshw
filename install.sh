@@ -22,8 +22,26 @@ asset="nshw-$host.tar.gz"
 url="${NSHW_BASE_URL:-https://github.com/$repo}/releases/download/v$version/$asset"
 work=$(mktemp -d "${TMPDIR:-/tmp}/nshw-install.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
-curl -fSL --retry 2 --connect-timeout 30 "$url" -o "$work/$asset"
-curl -fSL --retry 2 --connect-timeout 30 "$url.sha256" -o "$work/$asset.sha256"
+curl_auth=
+# Public releases need no authentication. A private repository uses gh's
+# existing login (or NSHW_TOKEN), stored in a private curl config rather
+# than a process argument, shell history or a URL.
+token="${NSHW_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+if [ -z "$token" ] && command -v gh >/dev/null 2>&1; then
+    token=$(gh auth token 2>/dev/null || true)
+fi
+if [ -n "$token" ]; then
+    umask 077
+    printf 'header = "Authorization: Bearer %s"\n' "$token" > "$work/curl.auth"
+    curl_auth="--config $work/curl.auth"
+else
+    printf '%s\n' 'no release token; for a private repository, use gh auth login or NSHW_TOKEN' >&2
+fi
+# Word splitting is intentional: curl_auth is empty or exactly two argv words.
+# shellcheck disable=SC2086
+curl -fSL --retry 2 --connect-timeout 30 $curl_auth "$url" -o "$work/$asset"
+# shellcheck disable=SC2086
+curl -fSL --retry 2 --connect-timeout 30 $curl_auth "$url.sha256" -o "$work/$asset.sha256"
 if command -v sha256sum >/dev/null 2>&1; then
     actual=$(sha256sum "$work/$asset" | cut -d ' ' -f 1)
 else

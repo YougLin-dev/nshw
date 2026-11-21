@@ -95,8 +95,14 @@ Self-referential symlinks to `nshw` are rejected to prevent recursion.
 Choose a release of the selector itself (default below), or use Cargo:
 
 ```sh
+# Public release:
 curl -fsSL https://raw.githubusercontent.com/YougLin-dev/nshw/main/install.sh | sh
-# or, from this source:
+
+# Private repository: GitHub CLI downloads the script; install.sh then uses
+# gh's access token (or NSHW_TOKEN) for release downloads, without a raw URL.
+gh api repos/YougLin-dev/nshw/contents/install.sh --jq .content | base64 --decode | sh
+
+# Or, from this source:
 cargo install --path .
 ```
 
@@ -110,9 +116,10 @@ file. Without that option the installed `nsh` is unchanged. Add
 source with `cargo install --path .` (or downloaded and extracted manually).
 
 The repository and releases must be readable by the installation route used.
-For private-repository distribution, deploy the installer and assets to an
-authenticated mirror of your own; `NSHW_BASE_URL` selects that HTTP origin
-for the script (the checksum requirements do not change).
+`gh auth login` supplies a private installation's existing GitHub access;
+`NSHW_TOKEN` is an explicit alternative for unattended installation. No
+credential is printed or appended to a release URL. For another release
+origin, `NSHW_BASE_URL` selects that HTTP origin without weakening checksums.
 
 ## Verification
 
