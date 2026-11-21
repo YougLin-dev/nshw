@@ -1,16 +1,15 @@
-//! Source-built toolchains for full Git-commit pins.
-//!
-//! The source is obtained before any build from a Cargo checkout when
-//! available, then from the pinned GitHub repository. The output is locked,
-//! staged and atomically renamed into the platform cache.
+//! Exact commits produce core desktop distributions: CLI, host and runner.
+//! Each repository/SHA owns its checkout and target. The source lock covers
+//! through acquisition, build and installation. The system Git supplies
+//! HTTPS and credential support; a Cargo checkout from another crate never
+//! substitutes for the repository the project selected.
 
 use crate::{exec, manifest, trust};
 use anyhow::{Context as _, Result, bail};
-use git2::Repository;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 pub(crate) fn dir(root: &Path, pin: &manifest::Pin, host: &str) -> PathBuf {
@@ -20,208 +19,239 @@ pub(crate) fn dir(root: &Path, pin: &manifest::Pin, host: &str) -> PathBuf {
         .join(host)
 }
 
-pub(crate) fn binary(root: &Path, pin: &manifest::Pin, host: &str) -> PathBuf {
-    dir(root, pin, host).join("bin").join(exec::exe("nsh"))
+fn staging(parent: &Path, label: &str) -> Result<PathBuf> {
+    let path = parent.join(format!(".{label}.{}.tmp", std::process::id()));
+    if path.exists() {
+        fs::remove_dir_all(&path)?;
+    }
+    fs::create_dir_all(&path)?;
+    Ok(path)
 }
 
 pub(crate) fn ensure_with_root(root: &Path, pin: &manifest::Pin, host: &str) -> Result<PathBuf> {
+    ensure_at(
+        root,
+        pin,
+        host,
+        &format!("https://github.com/{}.git", pin.repository),
+    )
+}
+
+fn ensure_at(root: &Path, pin: &manifest::Pin, host: &str, url: &str) -> Result<PathBuf> {
     trust::check(pin)?;
     let rev = pin
         .version
         .strip_prefix("rev=")
-        .context("source::ensure_with_root requires a rev pin")?;
-    let dir = dir(root, pin, host);
-    let bin = binary(root, pin, host);
-    if dir.join(".complete").is_file() && bin.is_file() {
-        return Ok(bin);
-    }
-    let version_dir = dir.parent().context("toolchain parent")?;
-    fs::create_dir_all(version_dir)?;
-    let lock_path = version_dir.join(format!(".{host}.lock"));
-    let lock_file = fs::File::options()
+        .context("a source pin requires rev=SHA")?;
+    let workspace = root
+        .join("sources")
+        .join(pin.repository.replace('/', "__"))
+        .join(rev);
+    fs::create_dir_all(&workspace)?;
+    let lock = fs::File::options()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(lock_path)?;
-    lock_file.lock()?;
-    if dir.join(".complete").is_file() && bin.is_file() {
+        .open(workspace.join(".lock"))?;
+    lock.lock().context("lock the pinned source")?;
+    let distribution = dir(root, pin, host);
+    let bin = distribution.join("bin").join(exec::exe("nsh"));
+    fs::create_dir_all(distribution.parent().context("toolchain parent")?)?;
+    if complete(&distribution, rev) {
         return Ok(bin);
     }
-
-    let sources = root.join("sources").join(pin.repository.replace('/', "__"));
-    fs::create_dir_all(&sources)?;
-    let url = format!("https://github.com/{}.git", pin.repository);
-    let source = if let Some(existing) = cached_checkout(rev) {
-        cached_checkout_copy(&existing, &sources, rev)?
-    } else {
-        let clone = sources.join("nsh");
-        if clone.exists() {
-            let repo = Repository::open(&clone)?;
-            let mut remote = repo.find_remote("origin")?;
-            remote.fetch(&[rev], None, None)?;
-            clone
-        } else {
-            Repository::clone(&url, &clone)?;
-            clone
+    let source = checked_out(&workspace, url, rev)?;
+    let staging = staging(distribution.parent().context("toolchain parent")?, host)?;
+    let result = install(&source, &staging)
+        .and_then(|()| Ok(fs::write(staging.join(".revision"), rev.as_bytes())?));
+    if result.is_ok() {
+        if distribution.exists() {
+            fs::remove_dir_all(&distribution)?;
         }
-    };
-    let repo = Repository::open(&source)?;
-    let object = repo.revparse_single(rev)?;
-    let commit = object.peel_to_commit()?;
-    if commit.id().to_string() != rev {
-        bail!("revision {rev} is not the fetched full commit");
+        fs::rename(&staging, &distribution)?;
     }
-    repo.checkout_tree(&object, Some(git2::build::CheckoutBuilder::new().force()))?;
-    repo.set_head_detached(commit.id())?;
-
-    let status = Command::new("cargo")
-        .args(["build", "--release", "--locked", "-p", "nsh-cli"])
-        .current_dir(&source)
-        .status()
-        .context("run cargo build")?;
-    if !status.success() {
-        bail!("cargo build --release --locked -p nsh-cli failed");
-    }
-    let built = source.join("target/release").join(exec::exe("nsh"));
-    if !built.is_file() {
-        bail!("built NSH not found at {}", built.display());
-    }
-
-    let staging = version_dir.join(format!(".{host}.tmp"));
-    if staging.exists() {
-        fs::remove_dir_all(&staging)?;
-    }
-    fs::create_dir_all(staging.join("bin"))?;
-    fs::copy(&built, staging.join("bin").join(exec::exe("nsh")))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mut perms = fs::metadata(staging.join("bin").join(exec::exe("nsh")))?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(staging.join("bin").join(exec::exe("nsh")), perms)?;
-    }
-    fs::write(staging.join(".complete"), b"")?;
-    if dir.exists() {
-        fs::remove_dir_all(&dir)?;
-    }
-    fs::rename(&staging, &dir)?;
+    let _ = fs::remove_dir_all(staging);
+    result?;
     Ok(bin)
 }
 
-fn cached_checkout(rev: &str) -> Option<PathBuf> {
-    let cargo = env_path("CARGO_HOME").or_else(|| env_path("HOME").map(|h| h.join(".cargo")))?;
-    for outer in fs::read_dir(cargo.join("git/checkouts")).ok()?.flatten() {
-        for entry in fs::read_dir(outer.path()).ok()?.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let repo = if let Ok(repo) = Repository::open(&path) {
-                repo
-            } else {
-                continue;
-            };
-            let Some(head) = repo.head().ok().and_then(|h| h.target()) else {
-                continue;
-            };
-            if head.to_string() == rev {
-                return Some(path);
-            }
+fn complete(distribution: &Path, rev: &str) -> bool {
+    let os = std::env::consts::OS;
+    distribution.join("bin").join(exec::exe("nsh")).is_file()
+        && fs::read_to_string(distribution.join(".revision")).is_ok_and(|r| r == rev)
+        && ["host", "app"].iter().all(|part| {
+            distribution
+                .join("runtime")
+                .join(os)
+                .join(exec::exe(&format!("nsh-{os}-{part}")))
+                .is_file()
+        })
+}
+
+fn git(directory: &Path, args: &[&str]) -> Result<()> {
+    run(Command::new("git").current_dir(directory).args(args))
+}
+
+/// Fetch the full SHA directly, even when no branch or tag advertises it.
+fn checked_out(workspace: &Path, url: &str, rev: &str) -> Result<PathBuf> {
+    let source = workspace.join("source");
+    if source.exists()
+        && fs::read_to_string(workspace.join("origin")).is_ok_and(|u| u.trim() == url)
+        && git(&source, &["cat-file", "-e", &format!("{rev}^{{commit}}")]).is_ok()
+    {
+        let head = Command::new("git")
+            .current_dir(&source)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        if head.status.success() && String::from_utf8_lossy(&head.stdout).trim() == rev {
+            return Ok(source);
         }
+        fs::remove_dir_all(&source)?;
     }
-    None
+    let staging = staging(workspace, "source")?;
+    git(&staging, &["init", "--quiet"])?;
+    git(&staging, &["remote", "add", "origin", url])?;
+    git(&staging, &["fetch", "--depth=1", "origin", rev])?;
+    let commit = Command::new("git")
+        .current_dir(&staging)
+        .args(["rev-parse", "FETCH_HEAD^{commit}"])
+        .output()?;
+    if !commit.status.success() || String::from_utf8_lossy(&commit.stdout).trim() != rev {
+        bail!("the repository did not provide the exact commit {rev}");
+    }
+    git(&staging, &["checkout", "--detach", "--force", rev])?;
+    if source.exists() {
+        fs::remove_dir_all(&source)?;
+    }
+    fs::rename(staging, &source)?;
+    fs::write(workspace.join("origin"), format!("{url}\n"))?;
+    Ok(source)
 }
 
-fn cached_checkout_copy(from: &Path, base: &Path, rev: &str) -> Result<PathBuf> {
-    let to = base.join(format!("nsh-{}", &rev[..7]));
-    if !to.exists() {
-        git2::build::RepoBuilder::new().clone(&from.to_string_lossy(), &to)?;
+/// Build NSH's core desktop distribution from this exact source revision.
+/// Optional iOS/Android/Web/GPUI/TUI runtimes are not silently substituted
+/// from an unrelated release; the desktop toolchain doesn't require them.
+fn install(source: &Path, staging: &Path) -> Result<()> {
+    let os = std::env::consts::OS;
+    run(Command::new("cargo")
+        .arg("+stable")
+        .current_dir(source)
+        .args(["build", "--locked", "--release", "-p", "nsh-cli", "-p"])
+        .arg(format!("nsh-{os}-host"))
+        .arg("-p")
+        .arg(format!("nsh-{os}-app"))
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET")
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit()))?;
+    let target = source.join("target/release");
+    fs::create_dir_all(staging.join("bin"))?;
+    copy_executable(
+        &target.join(exec::exe("nsh")),
+        &staging.join("bin").join(exec::exe("nsh")),
+    )?;
+    let runtime = staging.join("runtime").join(os);
+    fs::create_dir_all(&runtime)?;
+    for part in ["host", "app"] {
+        let name = exec::exe(&format!("nsh-{os}-{part}"));
+        copy_executable(&target.join(&name), &runtime.join(&name))?;
     }
-    Ok(to)
+    Ok(())
 }
 
-fn env_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name).map(PathBuf::from)
+fn copy_executable(from: &Path, to: &Path) -> Result<()> {
+    fs::copy(from, to).with_context(|| format!("copy {} to {}", from.display(), to.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = fs::metadata(to)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(to, permissions)?;
+    }
+    Ok(())
+}
+
+fn run(command: &mut Command) -> Result<()> {
+    let status = command.status().context("run the source tool")?;
+    if !status.success() {
+        bail!("source tool failed with {status}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
-
-    use git2::Signature;
-
     use super::*;
 
-    fn environment() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    #[test]
+    fn a_source_install_is_a_distribution_with_an_exact_revision() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("nshw-source-layout-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let distribution = root.join("dist/nsh");
+        let os = std::env::consts::OS;
+        fs::create_dir_all(distribution.join("bin"))?;
+        fs::create_dir_all(distribution.join("runtime").join(os))?;
+        fs::write(distribution.join("bin").join(exec::exe("nsh")), b"cli")?;
+        for part in ["host", "app"] {
+            fs::write(
+                distribution
+                    .join("runtime")
+                    .join(os)
+                    .join(exec::exe(&format!("nsh-{os}-{part}"))),
+                b"host",
+            )?;
+        }
+        assert!(!complete(&distribution, "abc"));
+        fs::write(distribution.join(".revision"), "abc")?;
+        assert!(complete(&distribution, "abc"));
+        assert!(!complete(&distribution, "def"));
+        fs::remove_file(
+            distribution
+                .join("runtime")
+                .join(os)
+                .join(exec::exe(&format!("nsh-{os}-host"))),
+        )?;
+        assert!(!complete(&distribution, "abc"));
+        let _ = fs::remove_dir_all(root);
+        Ok(())
     }
 
+    /// Real Git and Cargo, with a repository whose shape matches NSH's own
+    /// xtask distribution contract. This is not a local-path libgit2 test.
     #[test]
-    fn an_exact_revision_is_built_and_cached_from_a_cargo_checkout() {
-        let _guard = environment().lock().unwrap();
-        let base = std::env::temp_dir().join(format!(
-            "nshw-source-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+    fn a_remote_sha_builds_and_transparently_executes() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("nshw-source-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
-        let repo_dir = base.join("cargo/git/checkouts/nsh-fixture/abcdef0");
-        fs::create_dir_all(repo_dir.join("src")).unwrap();
-        fs::write(
-            repo_dir.join("Cargo.lock"),
-            "version = 4\n\n[[package]]\nname = \"nsh-cli\"\nversion = \"0.1.0\"\n",
-        )
-        .unwrap();
-        fs::write(
-            repo_dir.join("Cargo.toml"),
-            "[package]\nname = \"nsh-cli\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"nsh\"\npath = \"src/main.rs\"\n",
-        )
-        .unwrap();
-        fs::write(
-            repo_dir.join("src/main.rs"),
-            "fn main() { println!(\"fixture-nsh\"); }\n",
-        )
-        .unwrap();
-        let repo = Repository::init(&repo_dir).unwrap();
-        let mut index = repo.index().unwrap();
-        index.add_path(Path::new("Cargo.toml")).unwrap();
-        index.add_path(Path::new("Cargo.lock")).unwrap();
-        index.add_path(Path::new("src/main.rs")).unwrap();
-        let id = index.write_tree().unwrap();
-        let signature = Signature::now("nshw test", "test@example.com").unwrap();
-        let tree = repo.find_tree(id).unwrap();
-        let commit = repo
-            .commit(Some("HEAD"), &signature, &signature, "fixture", &tree, &[])
-            .unwrap()
-            .to_string();
-
-        let cache = base.join("cache");
-        // These process variables are scoped to this serial fixture test.
-        unsafe {
-            std::env::set_var("NSH_CACHE", &cache);
-            std::env::set_var("CARGO_HOME", base.join("cargo"));
-        }
+        let upstream = base.join("upstream");
+        super::super::test_support::source_fixture(&upstream)?;
+        let output = Command::new("git")
+            .current_dir(&upstream)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        let rev = String::from_utf8(output.stdout)?.trim().to_owned();
         let pin = manifest::Pin {
-            version: format!("rev={commit}"),
-            tag: format!("rev={commit}"),
-            repository: super::super::release::DEFAULT_REPOSITORY.into(),
+            version: format!("rev={rev}"),
+            tag: rev.clone(),
+            repository: crate::release::DEFAULT_REPOSITORY.into(),
         };
-        let host = super::super::release::host().unwrap();
-        let first = ensure_with_root(&cache, &pin, host).unwrap();
-        assert!(first.is_file());
-        let second = ensure_with_root(&cache, &pin, host).unwrap();
-        assert_eq!(first, second);
-        let output = Command::new(first).output().unwrap();
+        let cache = base.join("cache");
+        let host = crate::release::host()?;
+        let bin = ensure_at(&cache, &pin, host, upstream.to_str().unwrap())?;
+        assert!(complete(bin.parent().unwrap().parent().unwrap(), &rev));
+        let output = Command::new(&bin)
+            .args(["verify", "package.nshpkg"])
+            .output()?;
+        assert!(output.status.success());
         assert_eq!(
-            String::from_utf8_lossy(&output.stdout).trim(),
-            "fixture-nsh"
+            String::from_utf8(output.stdout)?.trim(),
+            "verify package.nshpkg"
         );
-        unsafe {
-            std::env::remove_var("NSH_CACHE");
-            std::env::remove_var("CARGO_HOME");
-        }
-        let _ = fs::remove_dir_all(&base);
+        assert_eq!(
+            ensure_at(&cache, &pin, host, upstream.to_str().unwrap())?,
+            bin
+        );
+        let _ = fs::remove_dir_all(base);
+        Ok(())
     }
 }

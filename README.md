@@ -1,43 +1,17 @@
 # nshw
 
-Run the Native Shell CLI your project pins. Every time, with the original
-arguments, without a second `nsh` executable name to learn.
+Run exactly the Native Shell distribution your project declares. `nshw`
+is independent of NSH: a version cannot fall back to another commit just
+because it has the same package version.
 
 ```sh
-nshw pin 0.6.1
+nshw toolchain pin 0.6.1
 nshw run src
-# Outputs nsh 0.6.1 even if the system nsh is older.
-
-nshw pin rev=e0ca503108f5f6aa8501e17d342fc06de64f1975
-# Set the repository in nsh.json and allow it explicitly (below) for a fork.
 ```
 
-## The contract
+## Declaration
 
-- `toolchain.nsh.version` is an exact release, or `rev=<full-40-hex-Git-SHA>`.
-- `toolchain.nsh.repository` defaults to `longbridge/nsh`.
-- Release selections download the GitHub prebuilt archive and verify its
-  `.sha256`. Git-revision selections use an existing Cargo checkout when
-  available, otherwise clone/fetch the requested repository, then run
-  `cargo build --release --locked -p nsh-cli`.
-- The selected CLI is run using `exec` on Unix (process replacement), and
-  synchronously with exit-status propagation on Windows. The original argv is
-  passed through untouched.
-- Apps and their `Cargo.toml` / `Cargo.lock` are never modified.
-
-## Commands
-
-| Command | Purpose |
-| --- | --- |
-| `nshw [nsh args...]` | Run the pinned CLI with those args. |
-| `nshw pin <release\|rev=SHA> [app]` | Write the pin, preserving all other `nsh.json` keys. |
-| `nshw prefetch [app]` | Install/build the selected CLI if absent. |
-| `nshw which [app]` | Print the selected CLI path. |
-| `nshw status [app]` | Show the pin, host, cache and the locked nsh-core revision when readable. |
-| `nshw verify [app]` | Check the release metadata against Cargo.lock. |
-| `nshw help` / `nshw version` | Tool help / tool version. |
-
-Example `nsh.json`:
+`nsh.json` selects an exact release tag or a full 40-hex Git commit:
 
 ```json
 {
@@ -51,37 +25,94 @@ Example `nsh.json`:
 }
 ```
 
+`repository` defaults to `longbridge/nsh`. Version ranges, channels, `latest`
+and abbreviated commit hashes are rejected; an exact declaration is the only
+input to selection.
+
+- **Release:** download that tag's archive, verify the published SHA-256,
+  validate its `nsh/` layout and atomically install it into the cache.
+- **Git revision:** fetch that exact commit from the declared repository with
+  the system `git`, then run its locked desktop builds: `nsh-cli` and this
+  platform's development host and release runner. This is a complete desktop
+  selection, not a CLI which silently borrows an older machine runtime.
+  Optional iOS/Android/Web/GPUI/TUI components are not built or substituted
+  from another release. The full commit owns its source, build output and
+  serialization lock; inherited `CARGO_TARGET_DIR`/`CARGO_BUILD_TARGET`
+  settings are removed so NSH's own target layout cannot be redirected.
+- **Execution:** `exec` on Unix, synchronous execution with exit-status
+  propagation on Windows. Original arguments are unchanged. No Cargo manifest
+  or lockfile is modified. Only the explicit pin command edits `nsh.json`.
+
+## Commands
+
+All normal input, including `nshw help`, `nshw version` and
+`nshw verify package.nshpkg`, belongs to the selected NSH CLI. The selector's
+administration has its own unambiguous namespace:
+
+| Command | Purpose |
+| --- | --- |
+| `nshw [nsh args...]` | Run the pinned CLI with unchanged arguments. |
+| `nshw -- [nsh args...]` | Explicit NSH pass-through. |
+| `nshw toolchain pin <release\|rev=SHA> [app]` | Update only the pin, preserving other settings. |
+| `nshw toolchain prefetch [app]` | Obtain the complete selected distribution. |
+| `nshw toolchain which [app]` | Print the selected CLI path. |
+| `nshw toolchain status [app]` | Show declaration, cache, host and lock revision. |
+| `nshw toolchain verify [app]` | Check the declaration against release metadata or the lock. |
+| `nshw toolchain help` / `version` | Selector help or its version. |
+
+Bare `nshw` describes these commands. When installed as an `nsh` alias, all
+of its arguments go to NSH; use the `nshw` executable for administration.
+An explicitly named app takes precedence over the current directory's app.
+
 ## Trust and offline use
 
-The implicit trust root is `longbridge/nsh`. A non-default repository requires
-`NSH_TOOLCHAIN_ALLOW=owner/repo` (comma-separated when needed), or an explicit
-`y` confirmation on a terminal. The trust check is done before any download or
-build. Checksums verify archive integrity against the stated release, not
-whether that repository is trustworthy.
+Only `longbridge/nsh` is trusted implicitly. Any other repository requires an
+`NSH_TOOLCHAIN_ALLOW=owner/repo` acknowledgement (comma-separated list), or
+an interactive `y` confirmation. This applies before source acquisition,
+download and execution. SHA-256 establishes archive integrity against the
+declared release; it does not make a fork trustworthy.
 
-Cache root: `NSH_CACHE`, else the platform cache directory followed by `nsh`.
-Separate repositories, revisions and host triples never share an installation.
-Release downloads are checksum-verified; source builds are locked selections.
-After the first successful install, ready toolchains run without network access.
+The cache root is `NSH_CACHE`, else the platform cache directory followed by
+`nsh`. Full repository/revision/host names are distinct. Cache hits execute
+without network access. A Git pin requires `git`, `cargo` and a Rust
+installation with the `stable` toolchain (invoked as `cargo +stable`). Release
+downloads use the system `curl` for platform TLS. These are explicit host
+prerequisites, not silent toolchain downloads.
 
-For a Git pin on a new machine, `git`, `cargo` and a Rust toolchain are needed
-for the first build. Cargo's existing checkout is copied rather than changed.
-A source pin does not promise a prebuilt artifact and cannot work offline
-unless the source or a Cargo checkout is already available.
+Source builds require the same native SDKs and libraries as the selected NSH
+revision's `xtask dist`. They can take considerable time and disk space.
+Optional Android/Web distributions still depend on the selected checkout's
+own requirements; no incompatible released component is substituted. With
+neither the local cache nor network access available, a new pin cannot be
+acquired.
+
+Without a pin, the explicit `NSH_FALLBACK`, the standard installed
+`~/.nsh`/`%LOCALAPPDATA%\nsh` distribution and then `nsh` on `PATH` are used.
+Self-referential symlinks to `nshw` are rejected to prevent recursion.
 
 ## Installation
 
-Install the release you choose into `~/.nshw/bin`, or build from source:
+Choose a release of the selector itself (default below), or use Cargo:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/YougLin-dev/nshw/main/install.sh | sh
-# or
+# or, from this source:
 cargo install --path .
 ```
 
-`install.sh` takes `NSHW_VERSION=...`, `NSHW_HOME=/prefix`, and
-`--set-default` (adds a `nsh` symlink ahead of the existing distribution).
-Installing `nshw` alone never replaces the system `nsh`.
+`install.sh` supports `NSHW_VERSION=...`, `NSHW_HOME=/prefix` and
+`--set-default` on macOS/Linux. It verifies both downloads and the archive
+layout before touching an existing install, stages the executable, then uses
+atomic renames and symlink replacement. The `n` alias points to `nshw`.
+`--set-default` additionally makes `nsh` a symlink, never overwriting a real
+file. Without that option the installed `nsh` is unchanged. Add
+`~/.nshw/bin` to `PATH` for your shell. Windows releases are installed from
+source with `cargo install --path .` (or downloaded and extracted manually).
+
+The repository and releases must be readable by the installation route used.
+For private-repository distribution, deploy the installer and assets to an
+authenticated mirror of your own; `NSHW_BASE_URL` selects that HTTP origin
+for the script (the checksum requirements do not change).
 
 ## Verification
 
@@ -89,11 +120,12 @@ Installing `nshw` alone never replaces the system `nsh`.
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+shellcheck install.sh
 ```
 
-The test suite includes local HTTP release serving with checksums, tar/zip
-unpacking, exact-pin validation, source building from a local Cargo checkout,
-installation and an execution check. GitHub migrations or NSH source-build
-requirements are independent of this selector; it does not simplify NSH's
-platform prerequisites. Linux and Windows differ in archive format and how
-process replacement is implemented.
+Tests include local HTTP release integrity checks, tar/zip behavior on the
+current platform, the exact pin parser, trust, original-argv forwarding and
+an actual Git/Cargo source fixture which builds a complete small distribution.
+Platform tests run on macOS, Ubuntu and Windows; release artifacts are built
+and smoke-tested on their native OS/architecture runners. Such fixtures do
+not replace actually building and exercising a real NSH revision.

@@ -118,14 +118,21 @@ mod tests {
             header.set_size(data.len() as u64);
             header.set_mode(0o755);
             header.set_cksum();
-            tar.append_data(&mut header, "nsh/bin/nsh", &data[..])
-                .unwrap();
+            tar.append_data(
+                &mut header,
+                Path::new("nsh/bin").join(super::super::exec::exe("nsh")),
+                &data[..],
+            )
+            .unwrap();
             tar.into_inner().unwrap().finish().unwrap();
         }
         let into = dir.join("out");
         let root = unpack(&archive, &into).unwrap();
         assert_eq!(root, into.join("nsh"));
-        assert_eq!(fs::read(root.join("bin/nsh")).unwrap(), b"fake");
+        assert_eq!(
+            fs::read(root.join("bin").join(super::super::exec::exe("nsh"))).unwrap(),
+            b"fake"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -139,14 +146,23 @@ mod tests {
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
-            zip.start_file("nsh/bin/nsh", options).unwrap();
+            zip.start_file(
+                Path::new("nsh/bin")
+                    .join(super::super::exec::exe("nsh"))
+                    .to_string_lossy(),
+                options,
+            )
+            .unwrap();
             zip.write_all(b"fake").unwrap();
             zip.finish().unwrap();
         }
         let into = dir.join("out");
         let root = unpack(&archive, &into).unwrap();
         assert_eq!(root, into.join("nsh"));
-        assert_eq!(fs::read(root.join("bin/nsh")).unwrap(), b"fake");
+        assert_eq!(
+            fs::read(root.join("bin").join(super::super::exec::exe("nsh"))).unwrap(),
+            b"fake"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

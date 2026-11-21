@@ -47,11 +47,6 @@ fn selected_dir(root: &Path, pin: &manifest::Pin, host: &str) -> PathBuf {
         .join(host)
 }
 
-#[cfg(test)]
-fn toolchain_dir_in(root: &Path, pin: &manifest::Pin, host: &str) -> PathBuf {
-    root.join("toolchains").join(&pin.version).join(host)
-}
-
 /// Installs (once) and returns the `nsh` of `pin` for this machine.
 pub(crate) fn ensure(
     app: &Path,
@@ -198,8 +193,8 @@ mod tests {
             repository: release::DEFAULT_REPOSITORY.into(),
         };
         assert_eq!(
-            toolchain_dir_in(Path::new("/cache"), &pin, "macos-arm64"),
-            Path::new("/cache/toolchains/0.6.1/macos-arm64")
+            selected_dir(Path::new("/cache"), &pin, "macos-arm64"),
+            Path::new("/cache/toolchains/longbridge__nsh/0.6.1/macos-arm64")
         );
     }
 

@@ -1,18 +1,9 @@
-//! `nshw` runs the nsh CLI a project pins in `nsh.json`.
+//! `nshw` is transparent to NSH's own commands. Administration lives under
+//! `nshw toolchain ...`; everything else reaches the selected CLI unchanged.
 //!
-//! A project writes:
-//!
-//! ```json
-//! "toolchain": { "nsh": { "version": "0.6.1", "repository": "longbridge/nsh" } }
-//! ```
-//!
-//! nshw reads that pin, downloads the matching prebuilt distribution once,
-//! verifies its SHA-256, caches it and execs its `nsh`. It never compiles nsh
-//! and never rewrites the app.
-//!
-//! Install it as `nsh` ahead of a distribution's `bin`, or run it as `nshw`.
-//! Its own commands are `nshw status`, `nshw verify`, `nshw prefetch`,
-//! `nshw which`, `nshw help` and `nshw version`.
+//! Release pins install a checksum-verified prebuilt distribution. Git pins
+//! build a distribution from exactly their full commit. Only the explicit
+//! `toolchain pin` edits `nsh.json`; Cargo manifests are never rewritten.
 
 mod archive;
 mod cache;
@@ -20,16 +11,13 @@ mod exec;
 mod manifest;
 mod release;
 mod source;
+#[cfg(test)]
+mod test_support;
 mod trust;
 
 use std::{ffi::OsString, path::Path, process::ExitCode};
 
 use anyhow::Context as _;
-
-/// The commands nshw handles itself; anything else is the pinned CLI's.
-const COMMANDS: [&str; 7] = [
-    "help", "version", "status", "verify", "prefetch", "which", "pin",
-];
 
 fn main() -> ExitCode {
     match run() {
@@ -41,29 +29,46 @@ fn main() -> ExitCode {
     }
 }
 
+/// Only this explicit namespace belongs to the selector. In particular,
+/// NSH's own `verify` verifies signed packages and is never intercepted.
 fn run() -> anyhow::Result<()> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    if let Some(command) = args
-        .first()
-        .and_then(|arg| arg.to_str())
-        .filter(|arg| COMMANDS.contains(arg))
-    {
-        return own_command(command, &args[1..]);
+    if !is_nsh_alias() && matches!(args.first().and_then(|a| a.to_str()), Some("toolchain")) {
+        return own_command(&args[1..]);
     }
-    let app = match manifest::find_app(&args) {
+    if matches!(args.first().and_then(|a| a.to_str()), Some("--")) {
+        return forward(&args[1..]);
+    }
+    if args.is_empty() && !is_nsh_alias() {
+        print_help();
+        return Ok(());
+    }
+    forward(&args)
+}
+
+fn is_nsh_alias() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy() == "nsh"))
+        .unwrap_or(false)
+}
+
+fn forward(args: &[OsString]) -> anyhow::Result<()> {
+    let app = match manifest::find_app(args) {
         Ok(app) => app,
-        Err(_) => return exec::fallback(&args),
+        Err(_) => return exec::fallback(args),
     };
     let config = manifest::read_config(&app)?;
     let Some(pin) = manifest::pin(&config)? else {
-        return exec::fallback(&args);
+        return exec::fallback(args);
     };
     let bin = cache::ensure(&app, &config, &pin)?;
-    exec::exec(&bin, &args)
+    exec::exec(&bin, args)
 }
 
-/// nshw's own commands, which never reach the pinned CLI.
-fn own_command(command: &str, args: &[OsString]) -> anyhow::Result<()> {
+/// nshw's administration, never NSH's own commands or package verification.
+fn own_command(args: &[OsString]) -> anyhow::Result<()> {
+    let command = args.first().and_then(|arg| arg.to_str()).unwrap_or("help");
     match command {
         "help" => {
             print_help();
@@ -73,9 +78,9 @@ fn own_command(command: &str, args: &[OsString]) -> anyhow::Result<()> {
             println!("nshw {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        "pin" => pin_command(args),
+        "pin" => pin_command(&args[1..]),
         "status" | "verify" | "prefetch" | "which" => {
-            let app = manifest::find_app(args)?;
+            let app = manifest::find_app(&args[1..])?;
             let config = manifest::read_config(&app)?;
             let pin = manifest::pin(&config)?.with_context(|| {
                 format!(
@@ -103,13 +108,13 @@ fn own_command(command: &str, args: &[OsString]) -> anyhow::Result<()> {
                 }
             }
         }
-        other => anyhow::bail!("unknown command {other}; try nshw help"),
+        other => anyhow::bail!("unknown command {other}; try nshw toolchain help"),
     }
 }
 
 fn pin_command(args: &[OsString]) -> anyhow::Result<()> {
     let Some(version) = args.first().and_then(|v| v.to_str()) else {
-        anyhow::bail!("usage: nshw pin <release|rev=FULL_GIT_SHA> [app]")
+        anyhow::bail!("usage: nshw toolchain pin <release|rev=FULL_GIT_SHA> [app]")
     };
     // Reuse the very same parser used by execution, so pin never writes a
     // value that the launcher will later reject.
@@ -188,7 +193,9 @@ fn verify(app: &Path, config: &manifest::Config, pin: &manifest::Pin) -> anyhow:
         if bin.is_file() {
             println!("ok: {} is {}", pin.version, bin.display());
         } else {
-            println!("ok: {rev} matches the project declaration; run nshw prefetch to build it");
+            println!(
+                "ok: {rev} matches the project declaration; run nshw toolchain prefetch to build it"
+            );
         }
         return Ok(());
     }
@@ -242,14 +249,15 @@ nshw {}
 Runs the nsh CLI a project pins in nsh.json.
 
 Usage:
-  nshw [nsh arguments...]    run the pinned CLI
-  nshw status [app]          show the pin, cache and selected CLI
-  nshw verify [app]          check the pin against the release and Cargo.lock
-  nshw pin <version|rev=SHA> write the exact toolchain pin in nsh.json
-  nshw prefetch [app]        obtain the pinned CLI now
-  nshw which [app]           print the selected CLI's path
-  nshw help
-  nshw version
+  nshw [nsh arguments...]          transparent NSH execution
+  nshw -- [nsh arguments...]       explicit NSH pass-through
+  nshw toolchain status [app]       show the pin, cache and selected CLI
+  nshw toolchain verify [app]          check the pin against the release and Cargo.lock
+  nshw toolchain pin <version|rev=SHA> write the exact toolchain pin in nsh.json
+  nshw toolchain prefetch [app]        obtain the pinned CLI now
+  nshw toolchain which [app]           print the selected CLI path
+  nshw toolchain help
+  nshw toolchain version
 
 The pin, in nsh.json:
   \"toolchain\": {{

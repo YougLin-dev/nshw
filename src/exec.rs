@@ -48,20 +48,32 @@ pub(crate) fn fallback(args: &[OsString]) -> anyhow::Result<()> {
 
 /// The distribution `NSH_FALLBACK` names, else the installer's `~/.nsh`
 /// (`%LOCALAPPDATA%\nsh`), unless that is nshw itself.
+fn candidate(path: PathBuf, current: Option<&PathBuf>) -> Option<PathBuf> {
+    let path = fs::canonicalize(path).ok()?;
+    (path.is_file() && Some(&path) != current).then_some(path)
+}
+
+/// Prefer an explicitly selected distribution, then PATH (Homebrew, Scoop,
+/// mise and similar). Exclude this wrapper's canonical executable to avoid
+/// recursively launching it through its own `nsh` symlink.
 fn fallback_bin() -> Option<PathBuf> {
     let current = std::env::current_exe()
         .ok()
         .and_then(|path| fs::canonicalize(path).ok());
-    let candidate = std::env::var_os("NSH_FALLBACK")
+    if let Some(explicit) = std::env::var_os("NSH_FALLBACK")
         .map(PathBuf::from)
-        .or_else(|| {
-            if cfg!(windows) {
-                std::env::var_os("LOCALAPPDATA")
-                    .map(|dir| PathBuf::from(dir).join("nsh/bin/nsh.exe"))
-            } else {
-                std::env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".nsh/bin/nsh"))
-            }
-        })?;
-    let candidate = fs::canonicalize(candidate).ok()?;
-    (candidate.is_file() && Some(&candidate) != current.as_ref()).then_some(candidate)
+        .and_then(|path| candidate(path, current.as_ref()))
+    {
+        return Some(explicit);
+    }
+    let installed = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("nsh/bin/nsh.exe"))
+    } else {
+        std::env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".nsh/bin/nsh"))
+    };
+    if let Some(installed) = installed.and_then(|path| candidate(path, current.as_ref())) {
+        return Some(installed);
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .find_map(|dir| candidate(dir.join(exe("nsh")), current.as_ref()))
 }

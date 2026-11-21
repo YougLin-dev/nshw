@@ -47,9 +47,6 @@ pub(crate) struct Pin {
 /// a directory or entry named in `args` (the command's app path).
 pub(crate) fn find_app(args: &[OsString]) -> anyhow::Result<PathBuf> {
     let cwd = std::env::current_dir().context("current directory")?;
-    if let Some(app) = cwd.ancestors().find(|dir| dir.join("nsh.json").is_file()) {
-        return Ok(app.to_owned());
-    }
     for arg in args {
         let Some(arg) = arg.to_str() else {
             continue;
@@ -67,6 +64,9 @@ pub(crate) fn find_app(args: &[OsString]) -> anyhow::Result<PathBuf> {
         {
             return Ok(parent.to_owned());
         }
+    }
+    if let Some(app) = cwd.ancestors().find(|dir| dir.join("nsh.json").is_file()) {
+        return Ok(app.to_owned());
     }
     bail!("no nsh.json found here or in the arguments; run inside an app or pass its directory")
 }
@@ -339,5 +339,28 @@ version = "1.0.0"
         .unwrap();
         assert_eq!(expected_rev(&app, &config).unwrap(), None);
         let _ = fs::remove_dir_all(&app);
+    }
+
+    #[test]
+    fn an_explicit_app_wins_over_the_current_app() {
+        let root = std::env::temp_dir().join(format!("nshw-find-app-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let current = root.join("current");
+        let other = root.join("other");
+        for app in [&current, &other] {
+            fs::create_dir_all(app).unwrap();
+            fs::write(app.join("nsh.json"), "{}").unwrap();
+        }
+        struct Restore(PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        let _restore = Restore(std::env::current_dir().unwrap());
+        std::env::set_current_dir(&current).unwrap();
+        let selected = find_app(&[OsString::from("run"), other.as_os_str().to_owned()]);
+        assert_eq!(selected.unwrap(), other);
+        let _ = fs::remove_dir_all(root);
     }
 }
