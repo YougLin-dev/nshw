@@ -1,14 +1,27 @@
 [package]
 name = "nshw"
 description = "Run the Native Shell CLI a project pins, always."
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
+rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/YougLin-dev/nshw"
+homepage = "https://github.com/YougLin-dev/nshw"
+documentation = "https://docs.rs/nshw"
+readme = "README.md"
+keywords = ["nsh", "toolchain", "version-manager", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = [".github/", "target/"]
 
 [[bin]]
 name = "nshw"
 path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
 
 [dependencies]
 anyhow = "1"
@@ -20,3 +33,7 @@ tar = { version = "0.4", default-features = false }
 toml = "0.8"
 tempfile = "3"
 zip = { version = "9", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"

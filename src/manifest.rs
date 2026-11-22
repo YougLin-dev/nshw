@@ -97,6 +97,14 @@ pub(crate) fn consumes_value(name: &str) -> bool {
     )
 }
 
+const APP_COMMANDS: &[&str] = &[
+    "init", "build", "test", "check", "dev", "run", "package", "publish", "verify",
+];
+
+fn is_app_command(command: Option<&str>) -> bool {
+    command.is_some_and(|command| APP_COMMANDS.contains(&command))
+}
+
 /// Only an app command's positional entry may select a project. NSH's argv
 /// is forwarded verbatim, but options still have their own grammar: treating
 /// every path-shaped token as an app can silently select another toolchain.
@@ -127,34 +135,24 @@ fn app_argument(args: &[OsString]) -> Option<OsString> {
             index += 1;
             continue;
         }
-        let app_command = matches!(
-            command.as_deref(),
-            Some(
-                "init"
-                    | "build"
-                    | "test"
-                    | "check"
-                    | "dev"
-                    | "run"
-                    | "package"
-                    | "publish"
-                    | "verify"
-            )
-        );
-        return app_command.then(|| args[index].clone());
+        return is_app_command(command.as_deref()).then(|| args[index].clone());
     }
     // No explicit entry: app commands take their current directory.
-    matches!(
-        command.as_deref(),
-        Some(
-            "init" | "build" | "test" | "check" | "dev" | "run" | "package" | "publish" | "verify",
-        )
-    )
-    .then(|| OsString::from("."))
+    is_app_command(command.as_deref()).then(|| OsString::from("."))
 }
 
-/// The explicit app entry wins; otherwise this directory or an ancestor.
-pub(crate) fn find_app(args: &[OsString]) -> anyhow::Result<PathBuf> {
+/// The app an invocation names, or `None` when there is no app around it.
+///
+/// A project command without an explicit entry uses the current directory,
+/// and a caller outside every app must be able to fall back to the installed
+/// distribution. An explicit entry that names no app is still an error,
+/// rather than a silent fallback to another app.
+pub(crate) fn locate_app(args: &[OsString]) -> anyhow::Result<Option<PathBuf>> {
+    let cwd = std::env::current_dir().context("current directory")?;
+    locate_app_in(&cwd, args)
+}
+
+fn locate_app_in(cwd: &Path, args: &[OsString]) -> anyhow::Result<Option<PathBuf>> {
     if let Some(entry) = app_argument(args) {
         let path = Path::new(&entry);
         let start = if path.is_dir() {
@@ -163,24 +161,30 @@ pub(crate) fn find_app(args: &[OsString]) -> anyhow::Result<PathBuf> {
             path.parent().unwrap_or(path)
         };
         if let Some(app) = start.ancestors().find(|dir| dir.join("nsh.json").is_file()) {
-            return Ok(app.to_owned());
+            return Ok(Some(app.to_owned()));
         }
         bail!(
             "{} is not inside an app containing nsh.json",
             path.display()
         );
     }
-    let cwd = std::env::current_dir().context("current directory")?;
-    if let Some(app) = [cwd.join("src"), cwd.clone()]
+    if let Some(app) = [cwd.join("src"), cwd.to_owned()]
         .into_iter()
         .find(|dir| dir.join("nsh.json").is_file())
     {
-        return Ok(app.canonicalize().unwrap_or(app));
+        return Ok(Some(app.canonicalize().unwrap_or(app)));
     }
-    if let Some(app) = cwd.ancestors().find(|dir| dir.join("nsh.json").is_file()) {
-        return Ok(app.canonicalize().unwrap_or_else(|_| app.to_owned()));
-    }
-    bail!("no nsh.json found here or in the arguments; run inside an app or pass its directory")
+    Ok(cwd
+        .ancestors()
+        .find(|dir| dir.join("nsh.json").is_file())
+        .map(|app| app.canonicalize().unwrap_or_else(|_| app.to_owned())))
+}
+
+/// The app an invocation names, with a useful error when none exists.
+pub(crate) fn find_app(args: &[OsString]) -> anyhow::Result<PathBuf> {
+    locate_app(args)?.with_context(
+        || "no nsh.json found here or in the arguments; run inside an app or pass its directory",
+    )
 }
 
 /// `nsh.json` in `app`.
@@ -475,39 +479,37 @@ version = "1.0.0"
             fs::create_dir_all(app).unwrap();
             fs::write(app.join("nsh.json"), "{}").unwrap();
         }
-        struct Restore(PathBuf);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                let _ = std::env::set_current_dir(&self.0);
-            }
-        }
-        let _restore = Restore(std::env::current_dir().unwrap());
-        std::env::set_current_dir(&current).unwrap();
-        let selected = find_app(&[OsString::from("run"), other.as_os_str().to_owned()]);
-        assert_eq!(selected.unwrap(), other);
-        let selected = find_app(&[
-            OsString::from("run"),
-            OsString::from("--name"),
-            root.as_os_str().to_owned(),
-            other.as_os_str().to_owned(),
-        ]);
-        assert_eq!(selected.unwrap(), other);
-        let _restore = Restore(std::env::current_dir().unwrap());
-        assert!(
-            find_app(&[
+        let selected = locate_app_in(
+            &current,
+            &[OsString::from("run"), other.as_os_str().to_owned()],
+        )
+        .unwrap();
+        assert_eq!(selected, Some(other.clone()));
+        let selected = locate_app_in(
+            &current,
+            &[
                 OsString::from("run"),
                 OsString::from("--name"),
                 root.as_os_str().to_owned(),
-                OsString::from("/missing"),
-            ])
+                other.as_os_str().to_owned(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(selected, Some(other));
+        assert!(
+            locate_app_in(
+                &current,
+                &[
+                    OsString::from("run"),
+                    OsString::from("--name"),
+                    root.as_os_str().to_owned(),
+                    OsString::from("/missing"),
+                ],
+            )
             .unwrap_err()
             .to_string()
             .contains("not inside an app")
         );
-        let original = std::env::current_dir().unwrap();
-        fs::create_dir_all(root.join("unrelated")).unwrap();
-        std::env::set_current_dir(root.join("unrelated")).unwrap();
-        let _ = std::env::set_current_dir(original);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -531,15 +533,26 @@ version = "1.0.0"
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/nsh.json"), "{}").unwrap();
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&root).unwrap();
-        let selected = find_app(&[OsString::from("toolchain"), OsString::from("prefetch")]);
-        std::env::set_current_dir(original).unwrap();
-        assert_eq!(selected.unwrap(), root.join("src").canonicalize().unwrap());
+        let selected = locate_app_in(
+            &root,
+            &[OsString::from("toolchain"), OsString::from("prefetch")],
+        )
+        .unwrap();
+        assert_eq!(selected, Some(root.join("src").canonicalize().unwrap()));
         assert_eq!(
             app_argument(&[OsString::from("run")]),
             Some(OsString::from("."))
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_app_less_directory_returns_none_for_fallback() {
+        let root = std::env::temp_dir().join(format!("nshw-no-app-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let selected = locate_app_in(&root, &[OsString::from("help")]).unwrap();
+        assert!(selected.is_none());
         let _ = fs::remove_dir_all(root);
     }
 }

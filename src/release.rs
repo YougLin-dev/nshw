@@ -94,6 +94,7 @@ pub(crate) fn download(
         .filter(|hash| hash.len() == 64)
         .context("checksum sidecar")?
         .to_ascii_lowercase();
+    eprintln!("downloading {url}");
     let response = get(&url)?;
     if !(200..300).contains(&response.status) {
         bail!("GET {url}: HTTP {}", response.status);
@@ -102,7 +103,7 @@ pub(crate) fn download(
     let mut reader = fs::File::open(response.body_path())?;
     let mut file = fs::File::create(to).with_context(|| format!("create {}", to.display()))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0; 256 * 1024];
+    let mut buffer = vec![0; 256 * 1024];
     loop {
         let read = reader.read(&mut buffer)?;
         if read == 0 {

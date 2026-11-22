@@ -16,14 +16,11 @@ pub(crate) fn check(pin: &crate::manifest::Pin) -> Result<()> {
     if repository == crate::release::DEFAULT_REPOSITORY {
         return Ok(());
     }
-    if env::var_os("NSH_TOOLCHAIN_ALLOW")
-        .map(|list| {
-            list.to_string_lossy()
-                .split(',')
-                .any(|r| r.trim() == repository)
-        })
-        .unwrap_or(false)
-    {
+    if env::var_os("NSH_TOOLCHAIN_ALLOW").is_some_and(|list| {
+        list.to_string_lossy()
+            .split(',')
+            .any(|r| r.trim() == repository)
+    }) {
         return Ok(());
     }
     if std::io::stdin().is_terminal() {
