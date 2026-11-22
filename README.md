@@ -1,5 +1,7 @@
 # nshw
 
+[![CI](https://github.com/YougLin-dev/nshw/actions/workflows/ci.yml/badge.svg)](https://github.com/YougLin-dev/nshw/actions/workflows/ci.yml)
+
 Run exactly the Native Shell distribution your project declares. `nshw`
 is independent of NSH: a version cannot fall back to another commit just
 because it has the same package version.
@@ -69,11 +71,14 @@ administration has its own unambiguous namespace:
 | `nshw toolchain which [app]` | Print the selected CLI path. |
 | `nshw toolchain status [app]` | Show declaration, cache, host and lock revision. |
 | `nshw toolchain verify [app]` | Check the declaration against release metadata or the lock. |
-| `nshw toolchain help` / `version` | Selector help or its version. |
+| `nshw toolchain help` / `--help` / `-h` | Selector help. |
+| `nshw toolchain version` / `--version` / `-V` | Selector version. |
 
 Bare `nshw` describes these commands. When installed as an `nsh` alias, all
 of its arguments go to NSH; use the `nshw` executable for administration.
 An explicitly named app takes precedence over the current directory's app.
+Outside an app, normal commands use the installed distribution described
+below instead of failing on a missing `nsh.json`.
 
 ## Trust and offline use
 
@@ -97,13 +102,17 @@ own requirements; no incompatible released component is substituted. With
 neither the local cache nor network access available, a new pin cannot be
 acquired.
 
-Without a pin, the explicit `NSH_FALLBACK`, the standard installed
+Without an app or a pin, the explicit `NSH_FALLBACK`, the standard installed
 `~/.nsh`/`%LOCALAPPDATA%\nsh` distribution and then `nsh` on `PATH` are used.
-Self-referential symlinks to `nshw` are rejected to prevent recursion.
+Self-referential symlinks to `nshw` are rejected to prevent recursion. Use
+`nshw toolchain status` to find the selected cache directory; remove that
+directory to reclaim space. Release downloads and source builds print their
+current step to stderr.
 
 ## Installation
 
-Choose a release of the selector itself (default below), or use Cargo:
+Choose a release of the selector itself (default below), or use Cargo. Building
+from source requires Rust 1.89 or newer.
 
 ```sh
 # Public release:
@@ -117,14 +126,15 @@ gh api repos/YougLin-dev/nshw/contents/install.sh --jq .content | base64 --decod
 cargo install --path .
 ```
 
-`install.sh` supports `NSHW_VERSION=...`, `NSHW_HOME=/prefix` and
-`--set-default` on macOS/Linux. It verifies both downloads and the archive
-layout before touching an existing install, stages the executable, then uses
-atomic renames and symlink replacement. The `n` alias points to `nshw`.
-`--set-default` additionally makes `nsh` a symlink, never overwriting a real
-file. Without that option the installed `nsh` is unchanged. Add
-`~/.nshw/bin` to `PATH` for your shell. Windows releases are installed from
-source with `cargo install --path .` (or downloaded and extracted manually).
+`install.sh` supports `NSHW_VERSION=...` (with or without a leading `v`),
+`NSHW_HOME=/prefix`, `--set-default`, `--help` and `--version` on
+macOS/Linux. It verifies both downloads and the archive layout before touching
+an existing install, stages the executable, then uses atomic renames and
+symlink replacement. The `n` alias points to `nshw`. `--set-default`
+additionally makes `nsh` a symlink, never overwriting a real file. Without that
+option the installed `nsh` is unchanged. Add `~/.nshw/bin` to `PATH` for your
+shell. Windows releases are installed from source with `cargo install --path .`
+(or downloaded and extracted manually).
 
 The repository and releases must be readable by the installation route used.
 `gh auth login` supplies a private installation's existing GitHub access;
@@ -136,14 +146,24 @@ origin, `NSHW_BASE_URL` selects that HTTP origin without weakening checksums.
 
 ```sh
 cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
 shellcheck install.sh
 ```
 
 Tests include local HTTP release integrity checks, tar/zip behavior on the
-current platform, the exact pin parser, trust, original-argv forwarding and
-an actual Git/Cargo source fixture which builds a complete small distribution.
-Platform tests run on macOS, Ubuntu and Windows; release artifacts are built
-and smoke-tested on their native OS/architecture runners. Such fixtures do
-not replace actually building and exercising a real NSH revision.
+current platform, archive link/traversal rejection, the exact pin parser,
+trust, original-argv forwarding, public CLI integration tests and an actual
+Git/Cargo source fixture which builds a complete small distribution. Platform
+tests run on macOS, Ubuntu and Windows; release artifacts are built and
+smoke-tested on their native OS/architecture runners. Such fixtures do not
+replace actually building and exercising a real NSH revision.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development and release
+workflow. Security reports should follow [SECURITY.md](SECURITY.md).
+
+## License
+
+Apache-2.0. See [LICENSE-APACHE](LICENSE-APACHE).
