@@ -34,6 +34,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@1.89.0
+      # The action's version tags mirror Rust releases, not action releases;
+      # select 1.89.0 through the input so Dependabot cannot bump the ref to
+      # a Rust version that has not been released.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo check --locked --all-targets
