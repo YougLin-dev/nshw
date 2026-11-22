@@ -113,10 +113,22 @@ pub(crate) fn download(
         file.write_all(&buffer[..read])?;
     }
     file.sync_all()?;
-    if format!("{:x}", hasher.finalize()) != expected {
+    if hex(hasher.finalize().as_slice()) != expected {
         bail!("the download of {url} does not match its SHA-256");
     }
     Ok(())
+}
+
+/// Lowercase hexadecimal for a digest or checksum.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(
+        String::with_capacity(bytes.len() * 2),
+        |mut output, byte| {
+            write!(output, "{byte:02x}").expect("writing to a String cannot fail");
+            output
+        },
+    )
 }
 
 /// Curl supplies the platform's TLS. Bytes live in a private, unique
@@ -208,5 +220,10 @@ mod tests {
             "nsh-macos-arm64.tar.gz"
         };
         assert_eq!(asset("macos-arm64"), expected);
+    }
+
+    #[test]
+    fn a_digest_is_lowercase_hex() {
+        assert_eq!(hex(&[0x00, 0xab, 0xff]), "00abff");
     }
 }

@@ -360,7 +360,7 @@ mod tests {
         let host = release::host().unwrap();
         let asset = release::asset(host);
         let archive = tarball();
-        let hash = format!("{:x}", Sha256::digest(&archive));
+        let hash = release::hex(Sha256::digest(&archive).as_slice());
         let base_path = "/longbridge/nsh/releases/download/v0.6.1";
         let files: HashMap<String, Vec<u8>> = [
             (format!("{base_path}/{asset}"), archive),
