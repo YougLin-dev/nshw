@@ -6,7 +6,6 @@ edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/YougLin-dev/nshw"
-homepage = "https://github.com/YougLin-dev/nshw"
 documentation = "https://docs.rs/nshw"
 readme = "README.md"
 keywords = ["nsh", "toolchain", "version-manager", "cli"]

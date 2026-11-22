@@ -36,6 +36,7 @@ pub(crate) fn unpack(archive: &Path, into: &Path) -> anyhow::Result<PathBuf> {
     if !metadata.file_type().is_file() {
         bail!("{} holds no regular nsh/bin/nsh", archive.display());
     }
+    #[cfg(unix)]
     executable(&bin)?;
     Ok(root)
 }
@@ -84,16 +85,12 @@ fn single_entry(dir: &Path) -> anyhow::Result<PathBuf> {
 }
 
 /// The CLI must be runnable (`zip` archives do not always carry the mode).
+#[cfg(unix)]
 fn executable(bin: &Path) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mut permissions = fs::metadata(bin)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(bin, permissions)?;
-    }
-    #[cfg(not(unix))]
-    let _ = bin;
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut permissions = fs::metadata(bin)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(bin, permissions)?;
     Ok(())
 }
 
