@@ -3,12 +3,31 @@
 set -eu
 repo="${NSHW_REPOSITORY:-YougLin-dev/nshw}"
 home="${NSHW_HOME:-$HOME/.nshw}"
-version="${NSHW_VERSION:-0.1.1}"
+version="${NSHW_VERSION:-0.2.0}"
+version="${version#v}"
+usage() {
+    cat <<EOF
+Usage: install.sh [--set-default]
+
+Installs nshw v$version into \$NSHW_HOME/bin, verifies its SHA-256 and
+archive layout, and never replaces an unrelated real nsh file.
+
+Environment:
+  NSHW_VERSION      release version (default: 0.2.0)
+  NSHW_HOME         install prefix (default: ~/.nshw)
+  NSHW_REPOSITORY   release repository (default: YougLin-dev/nshw)
+  NSHW_BASE_URL     alternate release origin
+  NSHW_TOKEN        token for private GitHub releases
+EOF
+}
 case "${1:-}" in
     '') default=0 ;;
     --set-default) default=1 ;;
-    *) printf '%s\n' 'Usage: install.sh [--set-default]' >&2; exit 2 ;;
+    -h|--help) usage; exit 0 ;;
+    -V|--version) printf 'nshw installer (release: v%s)\n' "$version"; exit 0 ;;
+    *) usage >&2; exit 2 ;;
 esac
+[ "$#" -le 1 ] || { usage >&2; exit 2; }
 os=$(uname -s)
 arch=$(uname -m)
 case "$os:$arch" in

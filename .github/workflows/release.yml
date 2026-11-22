@@ -6,18 +6,39 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release tag, e.g. v0.1.0'
+        description: 'Release tag, e.g. v0.2.0'
         required: true
       commit:
         description: 'Commit built by each platform'
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  check:
+    name: Release gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.inputs.commit || github.ref }}
+      - name: Check the release version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          tag="${{ github.event.inputs.version || github.ref_name }}"
+          test "v$version" = "$tag" || {
+            echo "release $tag does not match Cargo.toml v$version" >&2
+            exit 1
+          }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo test --locked
+
   package:
     name: ${{ matrix.name }}
+    needs: check
     strategy:
       fail-fast: false
       matrix:
@@ -30,7 +51,7 @@ jobs:
           - { name: windows-arm64, os: windows-11-arm, target: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.inputs.commit || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
@@ -46,9 +67,13 @@ jobs:
           cp "target/${{ matrix.target }}/release/$exe" dist/nshw/bin/
           ./dist/nshw/bin/$exe toolchain version
           (cd dist && tar czf "../nshw-${{ matrix.name }}.tar.gz" nshw)
-          sha256sum "nshw-${{ matrix.name }}.tar.gz" > "nshw-${{ matrix.name }}.tar.gz.sha256"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "nshw-${{ matrix.name }}.tar.gz" > "nshw-${{ matrix.name }}.tar.gz.sha256"
+          else
+            shasum -a 256 "nshw-${{ matrix.name }}.tar.gz" > "nshw-${{ matrix.name }}.tar.gz.sha256"
+          fi
           cat "nshw-${{ matrix.name }}.tar.gz.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nshw-${{ matrix.name }}
           path: nshw-${{ matrix.name }}.tar.gz*
@@ -59,17 +84,20 @@ jobs:
     needs: package
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.inputs.commit || github.ref }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: nshw-*
           path: assets
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.event.inputs.version || github.ref_name }}
           target_commitish: ${{ github.event.inputs.commit || github.sha }}
           files: assets/*
+          fail_on_unmatched_files: true

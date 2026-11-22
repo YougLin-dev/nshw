@@ -63,6 +63,7 @@ fn ensure_at(root: &Path, pin: &manifest::Pin, host: &str, url: &str) -> Result<
     }
     let source = checked_out(&workspace, url, rev)?;
     let staging = staging(distribution.parent().context("toolchain parent")?, host)?;
+    eprintln!("building NSH {rev} for {host}");
     let result = install(&source, &staging)
         .and_then(|()| Ok(fs::write(staging.join(".revision"), rev.as_bytes())?));
     if result.is_ok() {

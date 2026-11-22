@@ -31,14 +31,17 @@ pub(crate) fn unpack(archive: &Path, into: &Path) -> anyhow::Result<PathBuf> {
     }
     let root = single_entry(into)?;
     let bin = root.join("bin").join(super::exec::exe("nsh"));
-    if !bin.is_file() {
-        bail!("{} holds no nsh/bin/nsh", archive.display());
+    let metadata = fs::symlink_metadata(&bin)
+        .with_context(|| format!("{} holds no nsh/bin/nsh", archive.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!("{} holds no regular nsh/bin/nsh", archive.display());
     }
+    #[cfg(unix)]
     executable(&bin)?;
     Ok(root)
 }
 
-/// As `tar::Archive::unpack`, without the AppleDouble files (`._<name>`)
+/// As `tar::Archive::unpack`, without the `AppleDouble` files (`._<name>`)
 /// macOS's `tar` adds for extended attributes.
 fn unpack_tar<R: std::io::Read>(tar: &mut tar::Archive<R>, into: &Path) -> std::io::Result<()> {
     let mut directories = Vec::new();
@@ -51,7 +54,14 @@ fn unpack_tar<R: std::io::Read>(tar: &mut tar::Archive<R>, into: &Path) -> std::
         {
             continue;
         }
-        if entry.header().entry_type().is_dir() {
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the archive contains a link",
+            ));
+        }
+        if entry_type.is_dir() {
             directories.push(entry);
         } else {
             entry.unpack_in(into)?;
@@ -69,22 +79,18 @@ fn unpack_tar<R: std::io::Read>(tar: &mut tar::Archive<R>, into: &Path) -> std::
 fn single_entry(dir: &Path) -> anyhow::Result<PathBuf> {
     let mut entries = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
     match (entries.pop(), entries.is_empty()) {
-        (Some(entry), true) if entry.path().is_dir() => Ok(entry.path()),
+        (Some(entry), true) if entry.file_type()?.is_dir() => Ok(entry.path()),
         _ => bail!("the archive must hold one directory, nsh/"),
     }
 }
 
 /// The CLI must be runnable (`zip` archives do not always carry the mode).
+#[cfg(unix)]
 fn executable(bin: &Path) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mut permissions = fs::metadata(bin)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(bin, permissions)?;
-    }
-    #[cfg(not(unix))]
-    let _ = bin;
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut permissions = fs::metadata(bin)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(bin, permissions)?;
     Ok(())
 }
 
@@ -133,6 +139,48 @@ mod tests {
             fs::read(root.join("bin").join(super::super::exec::exe("nsh"))).unwrap(),
             b"fake"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tarball_link_is_rejected() {
+        let dir = dir("link");
+        fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("nsh.tar.gz");
+        {
+            let file = fs::File::create(&archive).unwrap();
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut tar = tar::Builder::new(encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_link_name("outside").unwrap();
+            header.set_cksum();
+            tar.append_data(&mut header, "nsh", std::io::empty())
+                .unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        let error = unpack(&archive, &dir.join("out")).unwrap_err();
+        assert!(format!("{error:#}").contains("link"), "{error:#}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_zip_entry_cannot_escape_its_destination() {
+        let dir = dir("zip-escape");
+        fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("nsh.zip");
+        {
+            let file = fs::File::create(&archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("../escape", options).unwrap();
+            zip.write_all(b"evil").unwrap();
+            zip.finish().unwrap();
+        }
+        assert!(unpack(&archive, &dir.join("out")).is_err());
+        assert!(!dir.join("escape").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
